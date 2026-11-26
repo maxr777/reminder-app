@@ -43,6 +43,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -74,6 +77,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -99,8 +103,15 @@ fun EditScreen(
     val ctx = LocalContext.current
     val colors = MaterialTheme.colorScheme
 
+    val existingCycle = existing?.isCycle == true
     var name by rememberSaveable { mutableStateOf(existing?.name ?: "") }
-    var interval by rememberSaveable { mutableIntStateOf(existing?.intervalDays ?: 7) }
+    var cycle by rememberSaveable { mutableStateOf(existingCycle) }
+    var interval by rememberSaveable {
+        mutableIntStateOf(if (existing != null && !existingCycle) existing.offDays + 1 else 7)
+    }
+    var onDays by rememberSaveable { mutableIntStateOf(if (existing != null && existingCycle) existing.onDays else 2) }
+    var offDays by rememberSaveable { mutableIntStateOf(if (existing != null && existingCycle) existing.offDays else 1) }
+    var streak by rememberSaveable { mutableIntStateOf(existing?.streak ?: 0) }
     var due by rememberSaveable { mutableStateOf(existing?.nextDue ?: today) }
     var time by rememberSaveable { mutableStateOf(existing?.time ?: LocalTime.of(20, 0)) }
     var color by rememberSaveable { mutableIntStateOf(existing?.color ?: defaultColor) }
@@ -115,21 +126,55 @@ fun EditScreen(
         if (existing == null) nameFocus.requestFocus()
     }
 
+    // When editing, keep the next date in step with the last time it was done.
+    fun recomputeDue() {
+        val last = existing?.lastDone ?: return
+        due = when {
+            !cycle -> last.plusDays(interval.toLong())
+            streak == 0 -> last.plusDays(offDays + 1L)
+            else -> last.plusDays(1)
+        }
+    }
+
     fun setInterval(n: Int) {
         interval = n.coerceIn(1, 365)
-        // When editing, keep the next date in step with the last time it was done.
-        existing?.lastDone?.let { due = it.plusDays(interval.toLong()) }
+        recomputeDue()
+    }
+
+    fun setOnDays(n: Int) {
+        onDays = n.coerceIn(2, 14)
+        streak = streak.coerceAtMost(onDays - 1)
+        recomputeDue()
+    }
+
+    fun setOffDays(n: Int) {
+        offDays = n.coerceIn(1, 60)
+        recomputeDue()
+    }
+
+    fun setStreak(n: Int) {
+        streak = n
+        recomputeDue()
+    }
+
+    fun setCycle(c: Boolean) {
+        if (cycle == c) return
+        cycle = c
+        streak = 0
+        recomputeDue()
     }
 
     fun save() {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         val scheduleChanged = existing == null || existing.nextDue != due || existing.time != time
-        val base = existing ?: Reminder(name = trimmed, intervalDays = interval, time = time, nextDue = due)
+        val base = existing ?: Reminder(name = trimmed, offDays = 0, time = time, nextDue = due)
         onSave(
             base.copy(
                 name = trimmed,
-                intervalDays = interval,
+                onDays = if (cycle) onDays else 1,
+                offDays = if (cycle) offDays else interval - 1,
+                streak = if (cycle) streak.coerceIn(0, onDays - 1) else 0,
                 time = time,
                 nextDue = due,
                 color = color,
@@ -195,73 +240,115 @@ fun EditScreen(
                 )
             }
 
-            // Repeat every
+            // Repeat
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                FieldLabel("Repeat every")
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    OutlinedIconButton(
-                        onClick = { setInterval(interval - 1) },
-                        enabled = interval > 1,
-                        modifier = Modifier.size(48.dp),
-                    ) {
-                        Icon(painterResource(R.drawable.ic_remove), contentDescription = "One day less")
-                    }
+                FieldLabel("Repeat")
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = !cycle,
+                        onClick = { setCycle(false) },
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                    ) { Text("Every N days") }
+                    SegmentedButton(
+                        selected = cycle,
+                        onClick = { setCycle(true) },
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                    ) { Text("Days on / off") }
+                }
+                if (!cycle) {
                     Row(
-                        Modifier
-                            .widthIn(min = 104.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable { showInterval = true }
-                            .padding(horizontal = 8.dp, vertical = 2.dp),
-                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Text(
-                            "$interval",
-                            fontSize = 40.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = colors.onBackground,
-                            modifier = Modifier.alignByBaseline(),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            if (interval == 1) "day" else "days",
-                            fontSize = 17.sp,
-                            color = colors.onSurfaceVariant,
-                            modifier = Modifier.alignByBaseline(),
-                        )
+                        OutlinedIconButton(
+                            onClick = { setInterval(interval - 1) },
+                            enabled = interval > 1,
+                            modifier = Modifier.size(48.dp),
+                        ) {
+                            Icon(painterResource(R.drawable.ic_remove), contentDescription = "One day less")
+                        }
+                        Row(
+                            Modifier
+                                .widthIn(min = 104.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { showInterval = true }
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Text(
+                                "$interval",
+                                fontSize = 40.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.onBackground,
+                                modifier = Modifier.alignByBaseline(),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                if (interval == 1) "day" else "days",
+                                fontSize = 17.sp,
+                                color = colors.onSurfaceVariant,
+                                modifier = Modifier.alignByBaseline(),
+                            )
+                        }
+                        OutlinedIconButton(
+                            onClick = { setInterval(interval + 1) },
+                            enabled = interval < 365,
+                            modifier = Modifier.size(48.dp),
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = "One day more")
+                        }
                     }
-                    OutlinedIconButton(
-                        onClick = { setInterval(interval + 1) },
-                        enabled = interval < 365,
-                        modifier = Modifier.size(48.dp),
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Icon(Icons.Filled.Add, contentDescription = "One day more")
+                        QuickIntervals.forEach { n ->
+                            FilterChip(
+                                selected = interval == n,
+                                onClick = { setInterval(n) },
+                                label = { Text("$n", fontSize = 14.sp) },
+                                shape = RoundedCornerShape(20.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = colors.secondaryContainer,
+                                    selectedLabelColor = colors.onSecondaryContainer,
+                                ),
+                            )
+                        }
                     }
-                }
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    QuickIntervals.forEach { n ->
-                        FilterChip(
-                            selected = interval == n,
-                            onClick = { setInterval(n) },
-                            label = { Text("$n", fontSize = 14.sp) },
-                            shape = RoundedCornerShape(20.dp),
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = colors.secondaryContainer,
-                                selectedLabelColor = colors.onSecondaryContainer,
-                            ),
-                        )
+                    Text(
+                        "Counted from the day you mark it done.",
+                        fontSize = 13.sp,
+                        color = colors.onSurfaceVariant,
+                    )
+                } else {
+                    CounterRow("Days on", onDays, min = 2, max = 14, onChange = { setOnDays(it) })
+                    CounterRow("Days off", offDays, min = 1, max = 60, onChange = { setOffDays(it) })
+                    Text("Next time is", fontSize = 14.sp, color = colors.onSurfaceVariant)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        (0 until onDays).forEach { i ->
+                            FilterChip(
+                                selected = streak == i,
+                                onClick = { setStreak(i) },
+                                label = { Text("Day ${i + 1} of $onDays", fontSize = 14.sp) },
+                                shape = RoundedCornerShape(20.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = colors.secondaryContainer,
+                                    selectedLabelColor = colors.onSecondaryContainer,
+                                ),
+                            )
+                        }
                     }
+                    Text(
+                        "Do it $onDays days in a row, then skip ${Format.days(offDays)}. " +
+                            "Each step counts from the day you mark it done.",
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        color = colors.onSurfaceVariant,
+                    )
                 }
-                Text(
-                    "Counted from the day you mark it done.",
-                    fontSize = 13.sp,
-                    color = colors.onSurfaceVariant,
-                )
             }
 
             // Date and time
@@ -417,6 +504,36 @@ fun EditScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CounterRow(label: String, value: Int, min: Int, max: Int, onChange: (Int) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 16.sp, color = colors.onSurface, modifier = Modifier.weight(1f))
+        OutlinedIconButton(
+            onClick = { onChange(value - 1) },
+            enabled = value > min,
+            modifier = Modifier.size(44.dp),
+        ) {
+            Icon(painterResource(R.drawable.ic_remove), contentDescription = "Fewer ${label.lowercase()}")
+        }
+        Text(
+            "$value",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            color = colors.onBackground,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.width(56.dp),
+        )
+        OutlinedIconButton(
+            onClick = { onChange(value + 1) },
+            enabled = value < max,
+            modifier = Modifier.size(44.dp),
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = "More ${label.lowercase()}")
         }
     }
 }

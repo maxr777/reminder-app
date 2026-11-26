@@ -26,6 +26,17 @@ object Format {
 
     fun every(n: Int) = if (n == 1) "Every day" else "Every $n days"
 
+    /** "Every 3 days" or "2 days on, 1 day off" */
+    fun schedule(r: Reminder): String =
+        if (r.isCycle) "${r.onDays} days on, ${days(r.offDays)} off" else every(r.offDays + 1)
+
+    /** Compact form for list rows: "Every 3 days" or "2 on, 1 off · day 1 of 2" */
+    fun scheduleShort(r: Reminder): String =
+        if (r.isCycle) "${r.onDays} on, ${r.offDays} off · ${cycleDay(r)}" else every(r.offDays + 1)
+
+    /** "day 2 of 2" */
+    fun cycleDay(r: Reminder): String = "day ${r.cycleDay} of ${r.onDays}"
+
     /** "Wednesday, 25 November" */
     fun longDate(d: LocalDate, today: LocalDate): String =
         d.format(if (d.year == today.year) long else longYear)
@@ -62,7 +73,7 @@ object Format {
         return t.format(DateTimeFormatter.ofPattern(pattern, EN))
     }
 
-    /** "Due today · every 7 days" or "1 day late · every 2 days" */
+    /** "Due today · every 7 days", "1 day late · every 2 days" or "Due today · day 2 of 2" */
     fun notificationText(r: Reminder, today: LocalDate): String {
         val n = daysBetween(today, r.nextDue)
         val status = when {
@@ -70,7 +81,8 @@ object Format {
             n == 0 -> "Due today"
             else -> "Due ${dayLabel(r.nextDue, today).lowercase(EN)}"
         }
-        return "$status · ${every(r.intervalDays).lowercase(EN)}"
+        val detail = if (r.isCycle) cycleDay(r) else every(r.offDays + 1).lowercase(EN)
+        return "$status · $detail"
     }
 
     /** "on time", "2 days late", "1 day early" */

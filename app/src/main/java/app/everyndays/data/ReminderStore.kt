@@ -66,9 +66,11 @@ object ReminderStore {
     @Synchronized
     fun markDone(id: Long, date: LocalDate): Reminder? {
         val r = get(id) ?: return null
+        val (next, streak) = r.afterDone(date)
         val updated = r.copy(
             history = r.history + Completion(done = date, due = r.nextDue),
-            nextDue = date.plusDays(r.intervalDays.toLong()),
+            nextDue = next,
+            streak = streak,
             notifiedFor = null,
         )
         return upsert(updated)
@@ -109,7 +111,9 @@ object ReminderStore {
                 JSONObject()
                     .put("id", r.id)
                     .put("name", r.name)
-                    .put("interval", r.intervalDays)
+                    .put("on", r.onDays)
+                    .put("off", r.offDays)
+                    .put("streak", r.streak)
                     .put("time", r.time.toString())
                     .put("nextDue", r.nextDue.toString())
                     .put("color", r.color)
@@ -119,7 +123,7 @@ object ReminderStore {
             )
         }
         return JSONObject()
-            .put("version", 1)
+            .put("version", 2)
             .put("nextId", nextId)
             .put("reminders", arr)
             .toString(2)
@@ -136,10 +140,15 @@ object ReminderStore {
                 val c = h.getJSONObject(j)
                 Completion(LocalDate.parse(c.getString("done")), LocalDate.parse(c.getString("due")))
             }
+            // Version 1 files only had "interval" (= 1 day on, interval-1 days off).
+            val on = if (o.has("on")) o.getInt("on") else 1
+            val off = if (o.has("off")) o.getInt("off") else o.getInt("interval") - 1
             list += Reminder(
                 id = o.getLong("id"),
                 name = o.getString("name"),
-                intervalDays = o.getInt("interval"),
+                onDays = on.coerceAtLeast(1),
+                offDays = off.coerceAtLeast(0),
+                streak = o.optInt("streak", 0).coerceIn(0, on.coerceAtLeast(1) - 1),
                 time = LocalTime.parse(o.getString("time")),
                 nextDue = LocalDate.parse(o.getString("nextDue")),
                 color = o.optInt("color", 0),

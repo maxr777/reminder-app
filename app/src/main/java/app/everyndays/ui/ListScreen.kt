@@ -204,7 +204,7 @@ private fun ReminderRow(r: Reminder, today: LocalDate, onOpen: () -> Unit, onDon
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(Format.every(r.intervalDays), fontSize = 14.sp, color = colors.onSurfaceVariant)
+            Text(Format.scheduleShort(r), fontSize = 14.sp, color = colors.onSurfaceVariant)
         }
         Spacer(Modifier.width(12.dp))
         when {

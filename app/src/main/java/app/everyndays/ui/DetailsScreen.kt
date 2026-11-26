@@ -115,7 +115,7 @@ fun DetailsScreen(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "${Format.every(r.intervalDays)} · at ${Format.time(ctx, r.time)}",
+                            "${Format.schedule(r)} · at ${Format.time(ctx, r.time)}",
                             fontSize = 15.sp,
                             color = colors.onSurfaceVariant,
                         )
@@ -147,7 +147,8 @@ fun DetailsScreen(
                         color = colors.onSurface,
                     )
                     Text(
-                        Format.relative(r.nextDue, today),
+                        Format.relative(r.nextDue, today) +
+                            if (r.isCycle) " · ${Format.cycleDay(r)}" else "",
                         fontSize = 15.sp,
                         color = if (diff < 0) colors.error else colors.onPrimaryContainer,
                     )
@@ -163,7 +164,7 @@ fun DetailsScreen(
                     }
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        "Next one would then be ${Format.commaDate(today.plusDays(r.intervalDays.toLong()), today)}",
+                        "Next one would then be ${Format.commaDate(r.afterDone(today).first, today)}",
                         fontSize = 13.sp,
                         color = colors.onPrimaryContainer,
                         textAlign = TextAlign.Center,
