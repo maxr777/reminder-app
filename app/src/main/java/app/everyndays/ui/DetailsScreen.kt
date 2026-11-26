@@ -20,10 +20,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -59,12 +61,16 @@ fun DetailsScreen(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onDone: () -> Unit,
+    onSkip: () -> Unit,
+    onPause: (Boolean) -> Unit,
 ) {
     val ctx = LocalContext.current
     val colors = MaterialTheme.colorScheme
     var confirmDelete by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
     val diff = Format.daysBetween(today, r.nextDue)
     val history = r.history.sortedByDescending { it.done }
+    val recurring = r.schedule.isRecurring
 
     Scaffold(
         containerColor = colors.background,
@@ -89,8 +95,37 @@ fun DetailsScreen(
                     IconButton(onClick = onEdit) {
                         Icon(Icons.Outlined.Edit, contentDescription = "Edit")
                     }
-                    IconButton(onClick = { confirmDelete = true }) {
-                        Icon(Icons.Outlined.Delete, contentDescription = "Delete")
+                    Box {
+                        IconButton(onClick = { menu = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                        }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            if (recurring && r.isActive) {
+                                DropdownMenuItem(
+                                    text = { Text("Skip this one") },
+                                    onClick = {
+                                        menu = false
+                                        onSkip()
+                                    },
+                                )
+                            }
+                            if (recurring && !r.finished) {
+                                DropdownMenuItem(
+                                    text = { Text(if (r.paused) "Resume" else "Pause") },
+                                    onClick = {
+                                        menu = false
+                                        onPause(!r.paused)
+                                    },
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text("Delete", color = colors.error) },
+                                onClick = {
+                                    menu = false
+                                    confirmDelete = true
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -120,57 +155,24 @@ fun DetailsScreen(
                             color = colors.onSurfaceVariant,
                         )
                     }
+                    val extras = listOfNotNull(
+                        Format.ending(r, today),
+                        if (r.advanceMinutes > 0) "Heads-up ${Format.advanceLabel(r.advanceMinutes)} before" else null,
+                    )
+                    if (extras.isNotEmpty()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            extras.joinToString(" · "),
+                            fontSize = 14.sp,
+                            color = colors.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 18.dp),
+                        )
+                    }
                 }
             }
 
             item {
-                Column(
-                    Modifier
-                        .padding(start = 16.dp, end = 16.dp, top = 24.dp)
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(colors.primaryContainer)
-                        .padding(20.dp)
-                ) {
-                    Text(
-                        if (diff < 0) "WAS DUE" else "NEXT REMINDER",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        letterSpacing = 0.8.sp,
-                        color = colors.onPrimaryContainer,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        Format.longDate(r.nextDue, today),
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = colors.onSurface,
-                    )
-                    Text(
-                        Format.relative(r.nextDue, today) +
-                            if (r.isCycle) " · ${Format.cycleDay(r)}" else "",
-                        fontSize = 15.sp,
-                        color = if (diff < 0) colors.error else colors.onPrimaryContainer,
-                    )
-                    Spacer(Modifier.height(16.dp))
-                    Button(
-                        onClick = onDone,
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth().height(52.dp),
-                    ) {
-                        Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Done today", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        "Next one would then be ${Format.commaDate(r.afterDone(today).first, today)}",
-                        fontSize = 13.sp,
-                        color = colors.onPrimaryContainer,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
+                StatusCard(r, today, diff, onDone = onDone, onResume = { onPause(false) }, onEdit = onEdit)
             }
 
             if (r.note.isNotBlank()) {
@@ -215,7 +217,7 @@ fun DetailsScreen(
                                 color = colors.onSurface,
                                 modifier = Modifier.weight(1f),
                             )
-                            val late = Format.daysBetween(c.due, c.done) > 0
+                            val late = !c.skipped && Format.daysBetween(c.due, c.done) > 0
                             Text(
                                 Format.completionLabel(c),
                                 fontSize = 14.sp,
@@ -244,5 +246,109 @@ fun DetailsScreen(
                 TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
             },
         )
+    }
+}
+
+@Composable
+private fun StatusCard(
+    r: Reminder,
+    today: LocalDate,
+    diff: Int,
+    onDone: () -> Unit,
+    onResume: () -> Unit,
+    onEdit: () -> Unit,
+) {
+    val ctx = LocalContext.current
+    val colors = MaterialTheme.colorScheme
+
+    val label: String
+    val title: String
+    val subtitle: String?
+    val button: String
+    val action: () -> Unit
+    val footer: String?
+    when {
+        r.finished -> {
+            label = "FINISHED"
+            title = r.finishedOn?.let { "Done ${Format.longDate(it, today)}" } ?: "Finished"
+            subtitle = null
+            button = "Set up again"
+            action = onEdit
+            footer = null
+        }
+        r.paused -> {
+            label = "PAUSED"
+            title = "Not reminding you"
+            subtitle = "Resume to pick up from today."
+            button = "Resume"
+            action = onResume
+            footer = null
+        }
+        else -> {
+            label = when {
+                diff < 0 -> "WAS DUE"
+                !r.schedule.isRecurring -> "DUE"
+                else -> "NEXT REMINDER"
+            }
+            title = Format.longDate(r.nextDue, today)
+            subtitle = "${Format.relative(r.nextDue, today)} · at ${Format.time(ctx, r.time)}" +
+                if (r.isCycle) " · ${Format.cycleDay(r)}" else ""
+            button = if (r.schedule.isRecurring) "Done today" else "Mark done"
+            action = onDone
+            footer = if (!r.schedule.isRecurring) {
+                null
+            } else {
+                val next = r.nextIfDoneOn(today)
+                if (next == null) "That would be the last one" else "Next one would then be ${Format.commaDate(next, today)}"
+            }
+        }
+    }
+
+    Column(
+        Modifier
+            .padding(start = 16.dp, end = 16.dp, top = 24.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
+            .background(colors.primaryContainer)
+            .padding(20.dp)
+    ) {
+        Text(
+            label,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.8.sp,
+            color = colors.onPrimaryContainer,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(title, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)
+        if (subtitle != null) {
+            Text(
+                subtitle,
+                fontSize = 15.sp,
+                color = if (r.isActive && diff < 0) colors.error else colors.onPrimaryContainer,
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = action,
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+        ) {
+            if (r.isActive) {
+                Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(button, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        }
+        if (footer != null) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                footer,
+                fontSize = 13.sp,
+                color = colors.onPrimaryContainer,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }

@@ -43,10 +43,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
@@ -65,6 +63,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.platform.LocalContext
@@ -83,13 +82,31 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import app.everyndays.Format
 import app.everyndays.R
+import app.everyndays.data.EndKind
 import app.everyndays.data.Reminder
+import app.everyndays.data.RepeatKind
+import app.everyndays.data.Schedule
+import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneOffset
+import java.time.format.TextStyle as JavaTextStyle
+import java.util.Locale
 
 private val QuickIntervals = listOf(1, 2, 3, 7, 14, 30)
+
+private val KindChoices = listOf(
+    RepeatKind.ONCE to "Once",
+    RepeatKind.DAYS to "Every N days",
+    RepeatKind.CYCLE to "Days on / off",
+    RepeatKind.WEEKLY to "Weekly",
+    RepeatKind.MONTHLY to "Monthly",
+    RepeatKind.YEARLY to "Yearly",
+)
+
+private fun maskOf(days: Set<Int>): Int = days.fold(0) { m, d -> m or (1 shl (d - 1)) }
+private fun daysOf(mask: Int): Set<Int> = (1..7).filter { mask and (1 shl (it - 1)) != 0 }.toSet()
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -102,84 +119,110 @@ fun EditScreen(
 ) {
     val ctx = LocalContext.current
     val colors = MaterialTheme.colorScheme
+    val s0 = existing?.schedule
 
-    val existingCycle = existing?.isCycle == true
     var name by rememberSaveable { mutableStateOf(existing?.name ?: "") }
-    var cycle by rememberSaveable { mutableStateOf(existingCycle) }
-    var interval by rememberSaveable {
-        mutableIntStateOf(if (existing != null && !existingCycle) existing.offDays + 1 else 7)
-    }
-    var onDays by rememberSaveable { mutableIntStateOf(if (existing != null && existingCycle) existing.onDays else 2) }
-    var offDays by rememberSaveable { mutableIntStateOf(if (existing != null && existingCycle) existing.offDays else 1) }
+    var kind by rememberSaveable { mutableStateOf(s0?.kind ?: RepeatKind.DAYS) }
+    var interval by rememberSaveable { mutableIntStateOf(s0?.takeIf { it.kind == RepeatKind.DAYS }?.every ?: 7) }
+    var fromDone by rememberSaveable { mutableStateOf(s0?.fromDone ?: true) }
+    var onDays by rememberSaveable { mutableIntStateOf(s0?.takeIf { it.kind == RepeatKind.CYCLE }?.onDays ?: 2) }
+    var offDays by rememberSaveable { mutableIntStateOf(s0?.takeIf { it.kind == RepeatKind.CYCLE }?.offDays ?: 1) }
     var streak by rememberSaveable { mutableIntStateOf(existing?.streak ?: 0) }
-    var due by rememberSaveable { mutableStateOf(existing?.nextDue ?: today) }
+    var weekdayMask by rememberSaveable {
+        mutableIntStateOf(
+            s0?.takeIf { it.kind == RepeatKind.WEEKLY && it.weekdays.isNotEmpty() }?.let { maskOf(it.weekdays) }
+                ?: maskOf(setOf(today.dayOfWeek.value))
+        )
+    }
+    var weeks by rememberSaveable { mutableIntStateOf(s0?.takeIf { it.kind == RepeatKind.WEEKLY }?.every ?: 1) }
+    var monthDay by rememberSaveable { mutableIntStateOf(s0?.takeIf { it.kind == RepeatKind.MONTHLY }?.monthDay ?: today.dayOfMonth) }
+    var months by rememberSaveable { mutableIntStateOf(s0?.takeIf { it.kind == RepeatKind.MONTHLY }?.every ?: 1) }
+    var date by rememberSaveable {
+        mutableStateOf(
+            when {
+                existing == null -> today
+                existing.finished -> maxOf(existing.nextDue, today)
+                else -> existing.nextDue
+            }
+        )
+    }
     var time by rememberSaveable { mutableStateOf(existing?.time ?: LocalTime.of(20, 0)) }
+    var advance by rememberSaveable { mutableIntStateOf(existing?.advanceMinutes ?: 0) }
+    var endKind by rememberSaveable { mutableStateOf(existing?.endKind ?: EndKind.NEVER) }
+    var endDate by rememberSaveable { mutableStateOf(existing?.endDate ?: today.plusMonths(1)) }
+    var endCount by rememberSaveable { mutableIntStateOf(existing?.endCount?.takeIf { it > 0 } ?: 10) }
     var color by rememberSaveable { mutableIntStateOf(existing?.color ?: defaultColor) }
     var note by rememberSaveable { mutableStateOf(existing?.note ?: "") }
 
-    var showDate by remember { mutableStateOf(false) }
-    var showTime by remember { mutableStateOf(false) }
-    var showInterval by remember { mutableStateOf(false) }
+    // Which dialog is open: "date", "endDate", "time", "interval", "count", or null.
+    var dialog by remember { mutableStateOf<String?>(null) }
 
     val nameFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         if (existing == null) nameFocus.requestFocus()
     }
 
-    // When editing, keep the next date in step with the last time it was done.
+    val weekdays = daysOf(weekdayMask)
+
+    fun buildSchedule(): Schedule = Schedule(
+        kind = kind,
+        every = when (kind) {
+            RepeatKind.DAYS -> interval
+            RepeatKind.WEEKLY -> weeks
+            RepeatKind.MONTHLY -> months
+            else -> 1
+        },
+        fromDone = fromDone,
+        onDays = onDays,
+        offDays = offDays,
+        weekdays = if (kind == RepeatKind.WEEKLY) weekdays else emptySet(),
+        monthDay = monthDay,
+        anchor = date,
+    )
+
+    /** The first due date the current settings give. */
+    fun firstDue(): LocalDate {
+        val s = buildSchedule()
+        val from = if (kind == RepeatKind.YEARLY && date.isBefore(today)) today else date
+        return s.firstOnOrAfter(from)
+    }
+
+    // When editing a from-done schedule, keep the next date in step with the last time it was done.
     fun recomputeDue() {
         val last = existing?.lastDone ?: return
-        due = when {
-            !cycle -> last.plusDays(interval.toLong())
-            streak == 0 -> last.plusDays(offDays + 1L)
-            else -> last.plusDays(1)
+        date = when (kind) {
+            RepeatKind.DAYS -> if (fromDone) last.plusDays(interval.toLong()) else return
+            RepeatKind.CYCLE -> if (streak == 0) last.plusDays(offDays + 1L) else last.plusDays(1)
+            else -> return
         }
     }
 
-    fun setInterval(n: Int) {
-        interval = n.coerceIn(1, 365)
-        recomputeDue()
-    }
-
-    fun setOnDays(n: Int) {
-        onDays = n.coerceIn(2, 14)
-        streak = streak.coerceAtMost(onDays - 1)
-        recomputeDue()
-    }
-
-    fun setOffDays(n: Int) {
-        offDays = n.coerceIn(1, 60)
-        recomputeDue()
-    }
-
-    fun setStreak(n: Int) {
-        streak = n
-        recomputeDue()
-    }
-
-    fun setCycle(c: Boolean) {
-        if (cycle == c) return
-        cycle = c
-        streak = 0
-        recomputeDue()
-    }
+    val canSave = name.isNotBlank() && (kind != RepeatKind.WEEKLY || weekdays.isNotEmpty())
 
     fun save() {
         val trimmed = name.trim()
-        if (trimmed.isEmpty()) return
-        val scheduleChanged = existing == null || existing.nextDue != due || existing.time != time
-        val base = existing ?: Reminder(name = trimmed, offDays = 0, time = time, nextDue = due)
+        if (!canSave) return
+        val schedule = buildSchedule()
+        val due = firstDue()
+        val scheduleChanged = existing == null || existing.nextDue != due || existing.time != time ||
+            existing.finished || existing.advanceMinutes != advance
+        val base = existing ?: Reminder(name = trimmed, schedule = schedule, time = time, nextDue = due)
         onSave(
             base.copy(
                 name = trimmed,
-                onDays = if (cycle) onDays else 1,
-                offDays = if (cycle) offDays else interval - 1,
-                streak = if (cycle) streak.coerceIn(0, onDays - 1) else 0,
+                schedule = schedule,
                 time = time,
                 nextDue = due,
+                streak = if (kind == RepeatKind.CYCLE) streak.coerceIn(0, onDays - 1) else 0,
+                endKind = if (kind == RepeatKind.ONCE) EndKind.NEVER else endKind,
+                endDate = if (endKind == EndKind.ON_DATE) endDate else null,
+                endCount = if (endKind == EndKind.AFTER_COUNT) endCount else 0,
+                advanceMinutes = advance,
+                finished = false,
                 color = color,
                 note = note.trim(),
                 notifiedFor = if (scheduleChanged) null else base.notifiedFor,
+                advanceNotifiedFor = if (scheduleChanged) null else base.advanceNotifiedFor,
             )
         )
     }
@@ -207,7 +250,7 @@ fun EditScreen(
             )
             Button(
                 onClick = { save() },
-                enabled = name.isNotBlank(),
+                enabled = canSave,
                 shape = RoundedCornerShape(22.dp),
                 contentPadding = PaddingValues(horizontal = 20.dp),
             ) {
@@ -229,7 +272,7 @@ fun EditScreen(
                     value = name,
                     onValueChange = { name = it },
                     singleLine = true,
-                    placeholder = { Text("e.g. Vitamin D3") },
+                    placeholder = { Text("e.g. Vitamin D3, Dentist") },
                     shape = RoundedCornerShape(14.dp),
                     textStyle = TextStyle(fontSize = 17.sp),
                     keyboardOptions = KeyboardOptions(
@@ -241,133 +284,291 @@ fun EditScreen(
             }
 
             // Repeat
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 FieldLabel("Repeat")
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    SegmentedButton(
-                        selected = !cycle,
-                        onClick = { setCycle(false) },
-                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                    ) { Text("Every N days") }
-                    SegmentedButton(
-                        selected = cycle,
-                        onClick = { setCycle(true) },
-                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                    ) { Text("Days on / off") }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    KindChoices.forEach { (k, label) ->
+                        Choice(label, selected = kind == k) {
+                            if (kind != k) {
+                                kind = k
+                                streak = 0
+                            }
+                        }
+                    }
                 }
-                if (!cycle) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        OutlinedIconButton(
-                            onClick = { setInterval(interval - 1) },
-                            enabled = interval > 1,
-                            modifier = Modifier.size(48.dp),
-                        ) {
-                            Icon(painterResource(R.drawable.ic_remove), contentDescription = "One day less")
-                        }
+
+                when (kind) {
+                    RepeatKind.ONCE -> {}
+
+                    RepeatKind.DAYS -> {
                         Row(
-                            Modifier
-                                .widthIn(min = 104.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable { showInterval = true }
-                                .padding(horizontal = 8.dp, vertical = 2.dp),
-                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            Text(
-                                "$interval",
-                                fontSize = 40.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = colors.onBackground,
-                                modifier = Modifier.alignByBaseline(),
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                if (interval == 1) "day" else "days",
-                                fontSize = 17.sp,
-                                color = colors.onSurfaceVariant,
-                                modifier = Modifier.alignByBaseline(),
-                            )
+                            RoundButton(minus = true, enabled = interval > 1, description = "One day less") {
+                                interval = (interval - 1).coerceAtLeast(1)
+                                recomputeDue()
+                            }
+                            Row(
+                                Modifier
+                                    .widthIn(min = 104.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { dialog = "interval" }
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                                horizontalArrangement = Arrangement.Center,
+                            ) {
+                                Text(
+                                    "$interval",
+                                    fontSize = 40.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.onBackground,
+                                    modifier = Modifier.alignByBaseline(),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    if (interval == 1) "day" else "days",
+                                    fontSize = 17.sp,
+                                    color = colors.onSurfaceVariant,
+                                    modifier = Modifier.alignByBaseline(),
+                                )
+                            }
+                            RoundButton(minus = false, enabled = interval < 365, description = "One day more") {
+                                interval = (interval + 1).coerceAtMost(365)
+                                recomputeDue()
+                            }
                         }
-                        OutlinedIconButton(
-                            onClick = { setInterval(interval + 1) },
-                            enabled = interval < 365,
-                            modifier = Modifier.size(48.dp),
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Icon(Icons.Filled.Add, contentDescription = "One day more")
+                            QuickIntervals.forEach { n ->
+                                Choice("$n", selected = interval == n) {
+                                    interval = n
+                                    recomputeDue()
+                                }
+                            }
+                        }
+                        SwitchRow(
+                            title = "Count from when I do it",
+                            subtitle = if (fromDone) {
+                                "If you're late, the next one moves too."
+                            } else {
+                                "Keeps a fixed rhythm, even if you're late."
+                            },
+                            checked = fromDone,
+                            onChange = {
+                                fromDone = it
+                                recomputeDue()
+                            },
+                        )
+                    }
+
+                    RepeatKind.CYCLE -> {
+                        CounterRow(
+                            label = "Days on",
+                            value = Format.days(onDays),
+                            canDecrease = onDays > 2,
+                            canIncrease = onDays < 14,
+                            onDecrease = {
+                                onDays -= 1
+                                streak = streak.coerceAtMost(onDays - 1)
+                                recomputeDue()
+                            },
+                            onIncrease = {
+                                onDays += 1
+                                recomputeDue()
+                            },
+                        )
+                        CounterRow(
+                            label = "Days off",
+                            value = Format.days(offDays),
+                            canDecrease = offDays > 1,
+                            canIncrease = offDays < 60,
+                            onDecrease = {
+                                offDays -= 1
+                                recomputeDue()
+                            },
+                            onIncrease = {
+                                offDays += 1
+                                recomputeDue()
+                            },
+                        )
+                        Text("Next time is", fontSize = 14.sp, color = colors.onSurfaceVariant)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            (0 until onDays).forEach { i ->
+                                Choice("Day ${i + 1} of $onDays", selected = streak == i) {
+                                    streak = i
+                                    recomputeDue()
+                                }
+                            }
+                        }
+                        Hint(
+                            "Do it $onDays days in a row, then skip ${Format.days(offDays)}. " +
+                                "Each step counts from the day you mark it done."
+                        )
+                    }
+
+                    RepeatKind.WEEKLY -> {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            (1..7).forEach { iso ->
+                                val selected = iso in weekdays
+                                val full = DayOfWeek.of(iso).getDisplayName(JavaTextStyle.FULL, Locale.ENGLISH)
+                                Box(
+                                    Modifier
+                                        .size(40.dp)
+                                        .clip(CircleShape)
+                                        .background(if (selected) colors.primary else Color.Transparent)
+                                        .border(1.dp, if (selected) colors.primary else colors.outline, CircleShape)
+                                        .clickable { weekdayMask = weekdayMask xor (1 shl (iso - 1)) }
+                                        .semantics {
+                                            contentDescription = full
+                                            this.selected = selected
+                                        },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        full.take(1),
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (selected) colors.onPrimary else colors.onSurface,
+                                    )
+                                }
+                            }
+                        }
+                        if (weekdays.isEmpty()) {
+                            Text("Pick at least one day.", fontSize = 13.sp, color = colors.error)
+                        }
+                        CounterRow(
+                            label = "Repeat every",
+                            value = if (weeks == 1) "week" else "$weeks weeks",
+                            canDecrease = weeks > 1,
+                            canIncrease = weeks < 8,
+                            onDecrease = { weeks -= 1 },
+                            onIncrease = { weeks += 1 },
+                        )
+                    }
+
+                    RepeatKind.MONTHLY -> {
+                        CounterRow(
+                            label = "On day",
+                            value = if (monthDay <= 0) "last" else Format.ordinal(monthDay),
+                            canDecrease = monthDay != 1,
+                            canIncrease = monthDay in 1..30,
+                            onDecrease = { monthDay = if (monthDay <= 0) 31 else monthDay - 1 },
+                            onIncrease = { monthDay += 1 },
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Choice("1st", selected = monthDay == 1) { monthDay = 1 }
+                            Choice("15th", selected = monthDay == 15) { monthDay = 15 }
+                            Choice("Last day", selected = monthDay <= 0) { monthDay = 0 }
+                        }
+                        CounterRow(
+                            label = "Repeat every",
+                            value = if (months == 1) "month" else "$months months",
+                            canDecrease = months > 1,
+                            canIncrease = months < 12,
+                            onDecrease = { months -= 1 },
+                            onIncrease = { months += 1 },
+                        )
+                        if (monthDay in 29..31) {
+                            Hint("In shorter months it falls on the last day.")
                         }
                     }
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        QuickIntervals.forEach { n ->
-                            FilterChip(
-                                selected = interval == n,
-                                onClick = { setInterval(n) },
-                                label = { Text("$n", fontSize = 14.sp) },
-                                shape = RoundedCornerShape(20.dp),
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = colors.secondaryContainer,
-                                    selectedLabelColor = colors.onSecondaryContainer,
-                                ),
-                            )
-                        }
+
+                    RepeatKind.YEARLY -> {
+                        Hint("Every year on ${Format.schedule(buildSchedule()).removePrefix("Yearly on ")}. Pick the date below.")
                     }
-                    Text(
-                        "Counted from the day you mark it done.",
-                        fontSize = 13.sp,
-                        color = colors.onSurfaceVariant,
-                    )
-                } else {
-                    CounterRow("Days on", onDays, min = 2, max = 14, onChange = { setOnDays(it) })
-                    CounterRow("Days off", offDays, min = 1, max = 60, onChange = { setOffDays(it) })
-                    Text("Next time is", fontSize = 14.sp, color = colors.onSurfaceVariant)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        (0 until onDays).forEach { i ->
-                            FilterChip(
-                                selected = streak == i,
-                                onClick = { setStreak(i) },
-                                label = { Text("Day ${i + 1} of $onDays", fontSize = 14.sp) },
-                                shape = RoundedCornerShape(20.dp),
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = colors.secondaryContainer,
-                                    selectedLabelColor = colors.onSecondaryContainer,
-                                ),
-                            )
-                        }
-                    }
-                    Text(
-                        "Do it $onDays days in a row, then skip ${Format.days(offDays)}. " +
-                            "Each step counts from the day you mark it done.",
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp,
-                        color = colors.onSurfaceVariant,
-                    )
                 }
             }
 
             // Date and time
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FieldLabel(if (existing == null) "First time" else "Next time")
-                    PickerField(
-                        icon = rememberVectorPainter(Icons.Outlined.DateRange),
-                        text = Format.dayLabel(due, today),
-                        onClick = { showDate = true },
-                    )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FieldLabel(
+                            when (kind) {
+                                RepeatKind.ONCE, RepeatKind.YEARLY -> "Date"
+                                RepeatKind.WEEKLY, RepeatKind.MONTHLY -> "Starting"
+                                else -> if (existing == null) "First time" else "Next time"
+                            }
+                        )
+                        PickerField(
+                            icon = rememberVectorPainter(Icons.Outlined.DateRange),
+                            text = Format.dayLabel(date, today),
+                            onClick = { dialog = "date" },
+                        )
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FieldLabel("Remind at")
+                        PickerField(
+                            icon = painterResource(R.drawable.ic_clock),
+                            text = Format.time(ctx, time),
+                            onClick = { dialog = "time" },
+                        )
+                    }
                 }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FieldLabel("Remind at")
-                    PickerField(
-                        icon = painterResource(R.drawable.ic_clock),
-                        text = Format.time(ctx, time),
-                        onClick = { showTime = true },
-                    )
+                if (kind != RepeatKind.WEEKLY || weekdays.isNotEmpty()) {
+                    val first = firstDue()
+                    if (first != date) {
+                        Hint("First time: ${Format.commaDate(first, today)}")
+                    }
+                }
+            }
+
+            // Heads-up
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                FieldLabel("Heads-up before")
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Format.advanceChoices.forEach { m ->
+                        Choice(Format.advanceLabel(m), selected = advance == m) { advance = m }
+                    }
+                }
+                Hint("An extra notification ahead of time, e.g. for appointments.")
+            }
+
+            // Ends
+            if (kind != RepeatKind.ONCE) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FieldLabel("Ends")
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Choice("Never", selected = endKind == EndKind.NEVER) { endKind = EndKind.NEVER }
+                        Choice("On a date", selected = endKind == EndKind.ON_DATE) { endKind = EndKind.ON_DATE }
+                        Choice("After a number of times", selected = endKind == EndKind.AFTER_COUNT) {
+                            endKind = EndKind.AFTER_COUNT
+                        }
+                    }
+                    when (endKind) {
+                        EndKind.ON_DATE -> PickerField(
+                            icon = rememberVectorPainter(Icons.Outlined.DateRange),
+                            text = "Last one by ${Format.commaDate(endDate, today)}",
+                            onClick = { dialog = "endDate" },
+                        )
+                        EndKind.AFTER_COUNT -> CounterRow(
+                            label = "Times",
+                            value = Format.times(endCount),
+                            canDecrease = endCount > 1,
+                            canIncrease = endCount < 999,
+                            onDecrease = { endCount -= 1 },
+                            onIncrease = { endCount += 1 },
+                            onValueClick = { dialog = "count" },
+                        )
+                        EndKind.NEVER -> {}
+                    }
+                    if (endKind == EndKind.AFTER_COUNT && existing != null && existing.history.isNotEmpty()) {
+                        Hint("Counts the ${Format.times(existing.history.size)} already in its history.")
+                    }
                 }
             }
 
@@ -419,122 +620,59 @@ fun EditScreen(
         }
     }
 
-    if (showInterval) {
-        var text by remember { mutableStateOf(interval.toString()) }
-        AlertDialog(
-            onDismissRequest = { showInterval = false },
-            title = { Text("Repeat every") },
-            text = {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { v -> text = v.filter { it.isDigit() }.take(3) },
-                    singleLine = true,
-                    suffix = { Text("days") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        text.toIntOrNull()?.let { if (it > 0) setInterval(it) }
-                        showInterval = false
-                    },
-                ) { Text("OK") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showInterval = false }) { Text("Cancel") }
+    when (dialog) {
+        "interval" -> NumberDialog(
+            title = "Repeat every",
+            unit = "days",
+            initial = interval,
+            max = 365,
+            onDismiss = { dialog = null },
+            onConfirm = {
+                interval = it
+                recomputeDue()
+                dialog = null
             },
         )
-    }
 
-    if (showDate) {
-        val state = rememberDatePickerState(
-            initialSelectedDateMillis = due.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+        "count" -> NumberDialog(
+            title = "Ends after",
+            unit = "times",
+            initial = endCount,
+            max = 999,
+            onDismiss = { dialog = null },
+            onConfirm = {
+                endCount = it
+                dialog = null
+            },
         )
-        DatePickerDialog(
-            onDismissRequest = { showDate = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        state.selectedDateMillis?.let {
-                            due = Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate()
-                        }
-                        showDate = false
-                    },
-                ) { Text("OK") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDate = false }) { Text("Cancel") }
-            },
-        ) {
-            DatePicker(state = state)
-        }
-    }
 
-    if (showTime) {
-        val state = rememberTimePickerState(
-            initialHour = time.hour,
-            initialMinute = time.minute,
+        "date" -> DateDialog(
+            initial = date,
+            onDismiss = { dialog = null },
+            onConfirm = {
+                date = it
+                dialog = null
+            },
+        )
+
+        "endDate" -> DateDialog(
+            initial = endDate,
+            onDismiss = { dialog = null },
+            onConfirm = {
+                endDate = it
+                dialog = null
+            },
+        )
+
+        "time" -> TimeDialog(
+            initial = time,
             is24Hour = DateFormat.is24HourFormat(ctx),
+            onDismiss = { dialog = null },
+            onConfirm = {
+                time = it
+                dialog = null
+            },
         )
-        Dialog(onDismissRequest = { showTime = false }) {
-            Surface(
-                shape = RoundedCornerShape(28.dp),
-                color = colors.surfaceContainerHigh,
-            ) {
-                Column(
-                    Modifier.padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(
-                        "Remind at",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = colors.onSurfaceVariant,
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp),
-                    )
-                    TimePicker(state = state)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = { showTime = false }) { Text("Cancel") }
-                        TextButton(
-                            onClick = {
-                                time = LocalTime.of(state.hour, state.minute)
-                                showTime = false
-                            },
-                        ) { Text("OK") }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CounterRow(label: String, value: Int, min: Int, max: Int, onChange: (Int) -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, fontSize = 16.sp, color = colors.onSurface, modifier = Modifier.weight(1f))
-        OutlinedIconButton(
-            onClick = { onChange(value - 1) },
-            enabled = value > min,
-            modifier = Modifier.size(44.dp),
-        ) {
-            Icon(painterResource(R.drawable.ic_remove), contentDescription = "Fewer ${label.lowercase()}")
-        }
-        Text(
-            "$value",
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = colors.onBackground,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.width(56.dp),
-        )
-        OutlinedIconButton(
-            onClick = { onChange(value + 1) },
-            enabled = value < max,
-            modifier = Modifier.size(44.dp),
-        ) {
-            Icon(Icons.Filled.Add, contentDescription = "More ${label.lowercase()}")
-        }
     }
 }
 
@@ -546,6 +684,95 @@ private fun FieldLabel(text: String) {
         fontWeight = FontWeight.SemiBold,
         color = MaterialTheme.colorScheme.onSurface,
     )
+}
+
+@Composable
+private fun Hint(text: String) {
+    Text(
+        text,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(label, fontSize = 14.sp) },
+        shape = RoundedCornerShape(20.dp),
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = colors.secondaryContainer,
+            selectedLabelColor = colors.onSecondaryContainer,
+        ),
+    )
+}
+
+@Composable
+private fun RoundButton(minus: Boolean, enabled: Boolean, description: String, onClick: () -> Unit) {
+    OutlinedIconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(48.dp)) {
+        if (minus) {
+            Icon(painterResource(R.drawable.ic_remove), contentDescription = description)
+        } else {
+            Icon(Icons.Filled.Add, contentDescription = description)
+        }
+    }
+}
+
+@Composable
+private fun CounterRow(
+    label: String,
+    value: String,
+    canDecrease: Boolean,
+    canIncrease: Boolean,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit,
+    onValueClick: (() -> Unit)? = null,
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 16.sp, color = colors.onSurface, modifier = Modifier.weight(1f))
+        OutlinedIconButton(onClick = onDecrease, enabled = canDecrease, modifier = Modifier.size(44.dp)) {
+            Icon(painterResource(R.drawable.ic_remove), contentDescription = "Less")
+        }
+        Text(
+            value,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = colors.onBackground,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .width(104.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .then(if (onValueClick != null) Modifier.clickable(onClick = onValueClick) else Modifier)
+                .padding(vertical = 10.dp),
+        )
+        OutlinedIconButton(onClick = onIncrease, enabled = canIncrease, modifier = Modifier.size(44.dp)) {
+            Icon(Icons.Filled.Add, contentDescription = "More")
+        }
+    }
+}
+
+@Composable
+private fun SwitchRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable { onChange(!checked) }
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, fontSize = 16.sp, color = colors.onSurface)
+            Text(subtitle, fontSize = 13.sp, lineHeight = 18.sp, color = colors.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
 }
 
 @Composable
@@ -564,6 +791,94 @@ private fun PickerField(icon: Painter, text: String, onClick: () -> Unit) {
     ) {
         Icon(icon, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(10.dp))
-        Text(text, fontSize = 16.sp, color = colors.onSurface)
+        Text(text, fontSize = 16.sp, color = colors.onSurface, maxLines = 1)
+    }
+}
+
+@Composable
+private fun NumberDialog(
+    title: String,
+    unit: String,
+    initial: Int,
+    max: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit,
+) {
+    var text by remember { mutableStateOf(initial.toString()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { v -> text = v.filter { it.isDigit() }.take(3) },
+                singleLine = true,
+                suffix = { Text(unit) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val n = text.toIntOrNull()
+                    if (n != null && n > 0) onConfirm(n.coerceAtMost(max)) else onDismiss()
+                },
+            ) { Text("OK") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DateDialog(initial: LocalDate, onDismiss: () -> Unit, onConfirm: (LocalDate) -> Unit) {
+    val state = rememberDatePickerState(
+        initialSelectedDateMillis = initial.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+    )
+    DatePickerDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val ms = state.selectedDateMillis
+                    if (ms != null) onConfirm(Instant.ofEpochMilli(ms).atZone(ZoneOffset.UTC).toLocalDate()) else onDismiss()
+                },
+            ) { Text("OK") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    ) {
+        DatePicker(state = state)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TimeDialog(initial: LocalTime, is24Hour: Boolean, onDismiss: () -> Unit, onConfirm: (LocalTime) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val state = rememberTimePickerState(
+        initialHour = initial.hour,
+        initialMinute = initial.minute,
+        is24Hour = is24Hour,
+    )
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(28.dp), color = colors.surfaceContainerHigh) {
+            Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "Remind at",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp),
+                )
+                TimePicker(state = state)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    TextButton(onClick = { onConfirm(LocalTime.of(state.hour, state.minute)) }) { Text("OK") }
+                }
+            }
+        }
     }
 }

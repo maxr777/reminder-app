@@ -1,27 +1,40 @@
 # Every N Days
 
-A small Android app for things you do every N days: supplements, skincare, plants, lenses.
+A small, private reminder app for Android, built for things that repeat (supplements, skincare,
+plants, lenses) and for one-off events.
 
-- Add a reminder with a name, a schedule, a time of day, and a color. The schedule is either "every N days" or a cycle like "2 days on, 1 day off".
-- At that time you get a notification with **Mark done**. It stays until you mark it done (or swipe it away).
-- The next date is counted from the day you actually mark it done (for cycles: each on-day follows the previous one, then the off days are skipped).
-- Each reminder keeps a history of when you did it.
+## What it does
 
-Everything is stored on the phone (`reminders.json` in the app's private storage). No account, no internet.
+- **Repeat options:** once; every N days; N days on / M days off; weekly on chosen days (every
+  1–8 weeks); monthly on a day or the last day (every 1–12 months); yearly.
+- "Every N days" and "days on / off" count from the day you actually mark it done (or, if you
+  choose, keep a fixed rhythm). Weekly, monthly and yearly stay on the calendar.
+- **Ends:** never, on a date, or after a number of times.
+- **Notifications** arrive on time and stay until you mark the reminder done. Optional heads-up
+  before (15 minutes to 1 week).
+- **Skip** one occurrence, **pause** and resume, full **history**.
+- **Backup / restore** to a file from the ⋮ menu on the main screen.
+
+Everything is stored on the phone. No account, no internet.
 
 ## Build
 
-Needs JDK 17 and the Android SDK (API 35).
+Pushing to `main` builds the APK on GitHub (after running the unit tests) and publishes it as
+the **latest** release: https://github.com/maxr777/reminder-app/releases/latest
 
-```
-./gradlew assembleRelease
-```
+Locally: JDK 17 + Android SDK (API 35), then `./gradlew assembleRelease`.
 
-The APK lands in `app/build/outputs/apk/release/app-release.apk`. It's signed with the debug key, which is fine for installing it on your own phone.
+### Signing
 
-Pushing to `main` also builds the APK on GitHub and publishes it as the **latest** release:
-https://github.com/maxr777/reminder-app/releases/latest
+Updates only install over an existing copy if every build is signed with the same key. The
+workflow uses two repository secrets for this:
+
+- `KEYSTORE_BASE64`: the keystore file, base64-encoded
+- `KEYSTORE_PASSWORD`: its password (key alias `everyndays`)
+
+Without them the build is signed with a temporary debug key.
 
 ## Install
 
-Copy the APK to the phone and open it. Android will ask you to allow installing apps from that source (Files or Chrome). Allow it once, install, and you can turn the permission off again.
+Open the APK on the phone. Android will ask you to allow installing apps from that source
+(Chrome or Files). Allow it, install, and you can turn the permission off again.

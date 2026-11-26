@@ -6,14 +6,14 @@ import android.content.Intent
 import app.everyndays.data.ReminderStore
 import java.time.LocalDate
 
-/** Fires when the next reminder is due. */
+/** Fires when the next reminder (or heads-up) is due. */
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Scheduler.reconcile(context)
     }
 }
 
-/** Reboot, app update, clock or time-zone change: rebuild everything. */
+/** Reboot, app update, clock or time-zone change, exact-alarm permission change: rebuild everything. */
 class SystemEventsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Scheduler.reconcile(context)
@@ -26,8 +26,8 @@ class DoneReceiver : BroadcastReceiver() {
         val id = intent.getLongExtra(Scheduler.EXTRA_ID, -1L)
         if (id <= 0L) return
         ReminderStore.init(context)
-        ReminderStore.markDone(id, LocalDate.now())
-        Scheduler.cancelNotification(context, id)
+        ReminderStore.complete(id, LocalDate.now())
+        Scheduler.cancelNotifications(context, id)
         Scheduler.reconcile(context)
     }
 }

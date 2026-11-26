@@ -13,6 +13,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
@@ -33,6 +36,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import app.everyndays.data.Reminder
+import app.everyndays.data.ReminderJson
 import app.everyndays.data.ReminderStore
 import app.everyndays.notify.Scheduler
 import app.everyndays.ui.AppTheme
@@ -118,23 +122,103 @@ private fun App(openRequest: MutableState<Long?>) {
         }
     }
 
-    fun markDone(r: Reminder) {
-        val now = LocalDate.now()
-        val updated = ReminderStore.markDone(r.id, now) ?: return
-        Scheduler.cancelNotification(ctx, r.id)
-        Scheduler.reconcile(ctx)
+    fun showUndo(message: String, before: Reminder) {
         scope.launch {
             snackbar.currentSnackbarData?.dismiss()
             val result = snackbar.showSnackbar(
-                message = "Done. Next: ${Format.commaDate(updated.nextDue, now)}",
+                message = message,
                 actionLabel = "Undo",
                 duration = SnackbarDuration.Short,
             )
             if (result == SnackbarResult.ActionPerformed) {
-                ReminderStore.upsert(r.copy(notifiedFor = null))
+                ReminderStore.upsert(before.copy(notifiedFor = null, advanceNotifiedFor = null))
                 Scheduler.reconcile(ctx)
             }
         }
+    }
+
+    fun message(text: String) {
+        scope.launch {
+            snackbar.currentSnackbarData?.dismiss()
+            snackbar.showSnackbar(text)
+        }
+    }
+
+    fun complete(r: Reminder, skipped: Boolean) {
+        val now = LocalDate.now()
+        val updated = ReminderStore.complete(r.id, now, skipped) ?: return
+        Scheduler.cancelNotifications(ctx, r.id)
+        Scheduler.reconcile(ctx)
+        val what = if (skipped) "Skipped" else "Done"
+        val text = when {
+            !updated.finished -> "$what. Next: ${Format.commaDate(updated.nextDue, now)}"
+            r.schedule.isRecurring -> "$what. That was the last one."
+            else -> "$what."
+        }
+        showUndo(text, r)
+    }
+
+    fun setPaused(r: Reminder, paused: Boolean) {
+        ReminderStore.setPaused(r.id, paused, LocalDate.now())
+        Scheduler.reconcile(ctx)
+        message(if (paused) "Paused. It won't remind you until you resume it." else "Resumed.")
+    }
+
+    // Backup and restore.
+    var pendingRestore by remember { mutableStateOf<String?>(null) }
+    val backupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(ReminderStore.exportJson().toByteArray()) }
+                message("Backup saved.")
+            } catch (e: Exception) {
+                message("Couldn't save the backup.")
+            }
+        }
+    }
+    val restoreLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                val text = ctx.contentResolver.openInputStream(uri)?.use { String(it.readBytes(), Charsets.UTF_8) }
+                if (text != null) {
+                    ReminderJson.decode(text) // check it's a valid backup before asking
+                    pendingRestore = text
+                }
+            } catch (e: Exception) {
+                message("That file isn't a backup from this app.")
+            }
+        }
+    }
+
+    pendingRestore?.let { text ->
+        val count = remember(text) { runCatching { ReminderJson.decode(text).first.size }.getOrDefault(0) }
+        AlertDialog(
+            onDismissRequest = { pendingRestore = null },
+            title = { Text("Restore from backup?") },
+            text = {
+                Text(
+                    "This replaces your ${items.size} current reminders with the $count in the backup.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingRestore = null
+                    try {
+                        val n = ReminderStore.importJson(text)
+                        Scheduler.reconcile(ctx)
+                        route = "list"
+                        message("Restored $n reminders.")
+                    } catch (e: Exception) {
+                        message("That file isn't a backup from this app.")
+                    }
+                }) { Text("Replace") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRestore = null }) { Text("Cancel") }
+            },
+        )
     }
 
     BackHandler(enabled = route != "list") { route = parentOf(route) }
@@ -155,11 +239,13 @@ private fun App(openRequest: MutableState<Long?>) {
                         onEdit = { route = "edit:${r.id}" },
                         onDelete = {
                             ReminderStore.delete(r.id)
-                            Scheduler.cancelNotification(ctx, r.id)
+                            Scheduler.cancelNotifications(ctx, r.id)
                             Scheduler.reconcile(ctx)
                             route = "list"
                         },
-                        onDone = { markDone(r) },
+                        onDone = { complete(r, skipped = false) },
+                        onSkip = { complete(r, skipped = true) },
+                        onPause = { setPaused(r, it) },
                     )
                 }
             }
@@ -193,7 +279,9 @@ private fun App(openRequest: MutableState<Long?>) {
                 },
                 onOpen = { route = "details:$it" },
                 onAdd = { route = "edit:new" },
-                onDone = { markDone(it) },
+                onDone = { complete(it, skipped = false) },
+                onBackup = { backupLauncher.launch("reminders-backup-${LocalDate.now()}.json") },
+                onRestore = { restoreLauncher.launch(arrayOf("*/*")) },
             )
         }
     }
