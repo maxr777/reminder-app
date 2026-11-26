@@ -19,7 +19,8 @@ Needs JDK 17 and the Android SDK (API 35).
 
 The APK lands in `app/build/outputs/apk/release/app-release.apk`. It's signed with the debug key, which is fine for installing it on your own phone.
 
-Pushing to GitHub also builds the APK automatically (Actions → latest run → Artifacts).
+Pushing to `main` also builds the APK on GitHub and publishes it as the **latest** release:
+https://github.com/maxr777/reminder-app/releases/latest
 
 ## Install
 
